@@ -248,7 +248,7 @@ setInterval(() => {
 }, 30 * 1000);
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Сигнальный сервер запущен на порту ${PORT}`);
   console.log(`WebSocket доступен по адресу: ws://localhost:${PORT}`);
 });
