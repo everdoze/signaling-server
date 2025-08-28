@@ -1,256 +1,223 @@
-// server.js - Сигнальный сервер для WebRTC
-const express = require('express');
+// signaling-server.js
+const WebSocket = require('ws');
 const http = require('http');
-const socketIo = require('socket.io');
-const cors = require('cors');
 
-const app = express();
-const server = http.createServer(app);
+const server = http.createServer();
+const wss = new WebSocket.Server({ server });
 
-// Настройка CORS для Socket.IO
-const io = socketIo(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-    credentials: true
-  },
-  transports: ['websocket', 'polling']
-});
+// Хранилище комнат и подключений
+const rooms = new Map();
+const connections = new Map();
 
-app.use(cors());
-app.use(express.json());
-
-// Хранилище активных соединений
-const connectedUsers = new Map();
-const activeCalls = new Map();
-
-// Базовый маршрут для проверки сервера
-app.get('/', (req, res) => {
-  res.send('Сигнальный сервер работает');
-});
-
-// API для получения списка онлайн пользователей
-app.get('/users', (req, res) => {
-  const users = Array.from(connectedUsers.values());
-  res.json(users);
-});
-
-io.on('connection', (socket) => {
-  console.log(`Пользователь подключен: ${socket.id}`);
+wss.on('connection', (ws) => {
+  console.log('New client connected');
   
-  // Добавляем пользователя в список подключенных
-  connectedUsers.set(socket.id, {
-    id: socket.id,
-    timestamp: Date.now()
-  });
+  // Генерируем уникальный ID для клиента
+  const clientId = generateId();
+  connections.set(clientId, ws);
   
-  // Уведомляем всех о новом пользователе
-  socket.broadcast.emit('user-connected', {
-    userId: socket.id,
-    totalUsers: connectedUsers.size
-  });
-  
-  // Отправляем текущему пользователю список онлайн пользователей
-  socket.emit('users-list', Array.from(connectedUsers.values()));
-  
-  // Обработка запроса на звонок
-  socket.on('call-request', (data) => {
-    console.log(`Запрос звонка от ${data.from} к ${data.to}`);
-    
-    // Проверяем, что получатель онлайн
-    if (!connectedUsers.has(data.to)) {
-      socket.emit('call-error', {
-        message: 'Пользователь не в сети',
-        code: 'USER_OFFLINE'
-      });
-      return;
-    }
-    
-    // Проверяем, что получатель не в другом звонке
-    let targetInCall = false;
-    for (let [callId, call] of activeCalls) {
-      if (call.participants.includes(data.to)) {
-        targetInCall = true;
-        break;
-      }
-    }
-    
-    if (targetInCall) {
-      socket.emit('call-error', {
-        message: 'Пользователь занят',
-        code: 'USER_BUSY'
-      });
-      return;
-    }
-    
-    // Создаем новый звонок
-    const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    activeCalls.set(callId, {
-      id: callId,
-      participants: [data.from, data.to],
-      initiator: data.from,
-      status: 'ringing',
-      timestamp: Date.now()
-    });
-    
-    // Отправляем запрос получателю
-    socket.to(data.to).emit('call-request', {
-      ...data,
-      callId: callId
-    });
-    
-    console.log(`Создан звонок ${callId} между ${data.from} и ${data.to}`);
-  });
-  
-  // Обработка принятия звонка
-  socket.on('call-accepted', (data) => {
-    console.log(`Звонок принят пользователем ${socket.id}`);
-    
-    // Находим активный звонок
-    let targetCall = null;
-    for (let [callId, call] of activeCalls) {
-      if (call.participants.includes(socket.id) && call.participants.includes(data.to)) {
-        targetCall = call;
-        break;
-      }
-    }
-    
-    if (targetCall) {
-      targetCall.status = 'accepted';
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message.toString());
+      console.log('Received:', data.type, 'from', clientId);
       
-      // Уведомляем инициатора звонка
-      socket.to(data.to).emit('call-accepted', {
-        from: socket.id,
-        callId: targetCall.id
-      });
-    }
-  });
-  
-  // Обработка отклонения звонка
-  socket.on('call-rejected', (data) => {
-    console.log(`Звонок отклонен пользователем ${socket.id}`);
-    
-    // Находим и удаляем звонок
-    for (let [callId, call] of activeCalls) {
-      if (call.participants.includes(socket.id) && call.participants.includes(data.to)) {
-        activeCalls.delete(callId);
-        break;
-      }
-    }
-    
-    // Уведомляем инициатора
-    socket.to(data.to).emit('call-rejected', {
-      from: socket.id
-    });
-  });
-  
-  // Обработка WebRTC offer
-  socket.on('offer', (data) => {
-    console.log(`Получен offer от ${socket.id} для ${data.to}`);
-    socket.to(data.to).emit('offer', {
-      offer: data.offer,
-      from: socket.id
-    });
-  });
-  
-  // Обработка WebRTC answer
-  socket.on('answer', (data) => {
-    console.log(`Получен answer от ${socket.id} для ${data.to}`);
-    socket.to(data.to).emit('answer', {
-      answer: data.answer,
-      from: socket.id
-    });
-  });
-  
-  // Обработка ICE candidates
-  socket.on('ice-candidate', (data) => {
-    console.log(`ICE candidate от ${socket.id} для ${data.to}`);
-    socket.to(data.to).emit('ice-candidate', {
-      candidate: data.candidate,
-      from: socket.id
-    });
-  });
-  
-  // Обработка завершения звонка
-  socket.on('call-ended', (data) => {
-    console.log(`Звонок завершен пользователем ${socket.id}`);
-    
-    // Находим и удаляем звонок
-    for (let [callId, call] of activeCalls) {
-      if (call.participants.includes(socket.id)) {
-        activeCalls.delete(callId);
+      switch (data.type) {
+        case 'join-room':
+          handleJoinRoom(clientId, data.roomId, ws);
+          break;
         
-        // Уведомляем другого участника
-        const otherParticipant = call.participants.find(p => p !== socket.id);
-        if (otherParticipant) {
-          socket.to(otherParticipant).emit('call-ended', {
-            from: socket.id
-          });
-        }
-        break;
-      }
-    }
-  });
-  
-  // Обработка отключения пользователя
-  socket.on('disconnect', () => {
-    console.log(`Пользователь отключен: ${socket.id}`);
-    
-    // Удаляем пользователя из списка подключенных
-    connectedUsers.delete(socket.id);
-    
-    // Завершаем все активные звонки пользователя
-    for (let [callId, call] of activeCalls) {
-      if (call.participants.includes(socket.id)) {
-        // Уведомляем другого участника
-        const otherParticipant = call.participants.find(p => p !== socket.id);
-        if (otherParticipant) {
-          socket.to(otherParticipant).emit('call-ended', {
-            from: socket.id,
-            reason: 'USER_DISCONNECTED'
-          });
-        }
+        case 'offer':
+          handleOffer(clientId, data.roomId, data.offer);
+          break;
         
-        // Удаляем звонок
-        activeCalls.delete(callId);
+        case 'answer':
+          handleAnswer(clientId, data.roomId, data.answer);
+          break;
+        
+        case 'ice-candidate':
+          handleIceCandidate(clientId, data.roomId, data.candidate);
+          break;
+        
+        case 'leave-room':
+          handleLeaveRoom(clientId, data.roomId);
+          break;
+        
+        default:
+          console.log('Unknown message type:', data.type);
       }
+    } catch (error) {
+      console.error('Error processing message:', error);
     }
-    
-    // Уведомляем всех об отключении пользователя
-    socket.broadcast.emit('user-disconnected', {
-      userId: socket.id,
-      totalUsers: connectedUsers.size
-    });
   });
   
-  // Heartbeat для проверки соединения
-  socket.on('ping', () => {
-    socket.emit('pong');
+  ws.on('close', () => {
+    console.log('Client disconnected:', clientId);
+    handleDisconnect(clientId);
+  });
+  
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
   });
 });
 
-// Очистка неактивных звонков (каждые 5 минут)
-setInterval(() => {
-  const now = Date.now();
-  const CALL_TIMEOUT = 5 * 60 * 1000; // 5 минут
+function handleJoinRoom(clientId, roomId, ws) {
+  if (!roomId) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Room ID is required'
+    });
+    return;
+  }
   
-  for (let [callId, call] of activeCalls) {
-    if (now - call.timestamp > CALL_TIMEOUT && call.status === 'ringing') {
-      console.log(`Удаление неактивного звонка: ${callId}`);
-      activeCalls.delete(callId);
+  // Получаем или создаем комнату
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, new Set());
+  }
+  
+  const room = rooms.get(roomId);
+  
+  // Проверяем, что в комнате не более 2 участников
+  if (room.size >= 2) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Room is full'
+    });
+    return;
+  }
+  
+  // Добавляем клиента в комнату
+  room.add(clientId);
+  
+  // Сохраняем информацию о комнате для клиента
+  const clientInfo = {
+    ws: ws,
+    roomId: roomId
+  };
+  connections.set(clientId, clientInfo);
+  
+  console.log(`Client ${clientId} joined room ${roomId}`);
+  
+  // Отправляем подтверждение
+  sendMessage(ws, {
+    type: 'room-joined',
+    roomId: roomId
+  });
+  
+  // Если в комнате уже есть другой участник, уведомляем его
+  if (room.size === 2) {
+    const otherClientId = Array.from(room).find(id => id !== clientId);
+    const otherClient = connections.get(otherClientId);
+    
+    if (otherClient && otherClient.ws) {
+      sendMessage(otherClient.ws, {
+        type: 'user-joined',
+        userId: clientId
+      });
     }
   }
-}, 5 * 60 * 1000);
+}
 
-// Логирование статистики каждые 30 секунд
-setInterval(() => {
-  console.log(`Статистика - Подключено: ${connectedUsers.size}, Активных звонков: ${activeCalls.size}`);
-}, 30 * 1000);
+function handleOffer(clientId, roomId, offer) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  
+  // Находим другого участника в комнате
+  const otherClientId = Array.from(room).find(id => id !== clientId);
+  if (!otherClientId) return;
+  
+  const otherClient = connections.get(otherClientId);
+  if (otherClient && otherClient.ws) {
+    sendMessage(otherClient.ws, {
+      type: 'offer',
+      offer: offer,
+      fromUserId: clientId
+    });
+  }
+}
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Сигнальный сервер запущен на порту ${PORT}`);
-  console.log(`WebSocket доступен по адресу: ws://localhost:${PORT}`);
+function handleAnswer(clientId, roomId, answer) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  
+  // Находим другого участника в комнате
+  const otherClientId = Array.from(room).find(id => id !== clientId);
+  if (!otherClientId) return;
+  
+  const otherClient = connections.get(otherClientId);
+  if (otherClient && otherClient.ws) {
+    sendMessage(otherClient.ws, {
+      type: 'answer',
+      answer: answer,
+      fromUserId: clientId
+    });
+  }
+}
+
+function handleIceCandidate(clientId, roomId, candidate) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  
+  // Находим другого участника в комнате
+  const otherClientId = Array.from(room).find(id => id !== clientId);
+  if (!otherClientId) return;
+  
+  const otherClient = connections.get(otherClientId);
+  if (otherClient && otherClient.ws) {
+    sendMessage(otherClient.ws, {
+      type: 'ice-candidate',
+      candidate: candidate,
+      fromUserId: clientId
+    });
+  }
+}
+
+function handleLeaveRoom(clientId, roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  
+  // Удаляем клиента из комнаты
+  room.delete(clientId);
+  
+  // Если комната пустая, удаляем её
+  if (room.size === 0) {
+    rooms.delete(roomId);
+  } else {
+    // Уведомляем оставшегося участника
+    const otherClientId = Array.from(room)[0];
+    const otherClient = connections.get(otherClientId);
+    
+    if (otherClient && otherClient.ws) {
+      sendMessage(otherClient.ws, {
+        type: 'user-left',
+        userId: clientId
+      });
+    }
+  }
+  
+  console.log(`Client ${clientId} left room ${roomId}`);
+}
+
+function handleDisconnect(clientId) {
+  const clientInfo = connections.get(clientId);
+  
+  if (clientInfo && clientInfo.roomId) {
+    handleLeaveRoom(clientId, clientInfo.roomId);
+  }
+  
+  connections.delete(clientId);
+}
+
+function sendMessage(ws, message) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(message));
+  }
+}
+
+function generateId() {
+  return Math.random().toString(36).substr(2, 9);
+}
+
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => {
+  console.log(`Signaling server running on port ${PORT}`);
 });
-
-module.exports = app;
