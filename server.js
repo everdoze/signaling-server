@@ -55,6 +55,10 @@ wss.on('connection', (ws, req) => {
       log(`Received from ${clientId}: ${data.type}`);
       
       switch (data.type) {
+        case 'peer-ready':
+          handlePeerReady(clientId, data.roomId, ws);
+          break;
+        
         case 'join-room':
           handleJoinRoom(clientId, data.roomId, ws);
           break;
@@ -98,6 +102,18 @@ wss.on('connection', (ws, req) => {
     log(`WebSocket error for ${clientId}: ${error.message}`, 'ERROR');
   });
 });
+
+function handlePeerReady(clientId, ws) {
+  const clientInfo = connections.get(clientId);
+  if (clientInfo && clientInfo.roomId) {
+    sendMessage(ws, {
+      type: 'user-peer-ready',
+      roomId: clientInfo.roomId
+    });
+  }
+  
+  log(`Client ${clientId} called peer-ready without connecting.`, 'ERROR');
+}
 
 function handleJoinRoom(clientId, roomId, ws) {
   if (!roomId) {
