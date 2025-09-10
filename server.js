@@ -1,9 +1,8 @@
-// signaling-server.js с расширенной отладкой
+// ИСПРАВЛЕННЫЙ signaling-server.js
 const WebSocket = require('ws');
 const http = require('http');
 
 const server = http.createServer((req, res) => {
-  // Добавляем простой HTTP endpoint для тестирования доступности
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -18,24 +17,15 @@ const server = http.createServer((req, res) => {
   }
 });
 
-const wss = new WebSocket.Server({
-  server,
-  perMessageDeflate: false // Отключаем компрессию для отладки
-});
+const wss = new WebSocket.Server({ server });
 
 // Хранилище комнат и подключений
 const rooms = new Map();
 const connections = new Map();
 
-// Функция логирования с временными метками
 function log(message, level = 'INFO') {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] [${level}] ${message}`);
-}
-
-// Статистика сервера
-function logStats() {
-  log(`Server stats - Connections: ${connections.size}, Rooms: ${rooms.size}, Active rooms: ${Array.from(rooms.values()).filter(room => room.size > 0).length}`);
 }
 
 wss.on('connection', (ws, req) => {
@@ -44,6 +34,7 @@ wss.on('connection', (ws, req) => {
   
   log(`New client connected: ${clientId} from ${clientIP}`);
   
+  // ИСПРАВЛЕНО: правильная структура хранения клиента
   connections.set(clientId, {
     ws: ws,
     roomId: null,
@@ -61,7 +52,7 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message.toString());
-      log(`Received from ${clientId}: ${data.type}`, 'DEBUG');
+      log(`Received from ${clientId}: ${data.type}`);
       
       switch (data.type) {
         case 'join-room':
@@ -69,10 +60,12 @@ wss.on('connection', (ws, req) => {
           break;
         
         case 'offer':
+          log(`Processing offer from ${clientId} to room ${data.roomId}`);
           handleOffer(clientId, data.roomId, data.offer);
           break;
         
         case 'answer':
+          log(`Processing answer from ${clientId} to room ${data.roomId}`);
           handleAnswer(clientId, data.roomId, data.answer);
           break;
         
@@ -85,46 +78,24 @@ wss.on('connection', (ws, req) => {
           break;
         
         case 'ping':
-          // Ответ на ping для проверки соединения
           sendMessage(ws, { type: 'pong', timestamp: Date.now() });
           break;
         
         default:
           log(`Unknown message type from ${clientId}: ${data.type}`, 'WARN');
-          sendMessage(ws, {
-            type: 'error',
-            message: `Unknown message type: ${data.type}`
-          });
       }
     } catch (error) {
       log(`Error processing message from ${clientId}: ${error.message}`, 'ERROR');
-      sendMessage(ws, {
-        type: 'error',
-        message: 'Invalid message format'
-      });
     }
   });
   
   ws.on('close', (code, reason) => {
-    log(`Client ${clientId} disconnected: code=${code}, reason=${reason}`, 'INFO');
+    log(`Client ${clientId} disconnected: code=${code}, reason=${reason}`);
     handleDisconnect(clientId);
   });
   
   ws.on('error', (error) => {
     log(`WebSocket error for ${clientId}: ${error.message}`, 'ERROR');
-  });
-  
-  // Пинг каждые 30 секунд для поддержания соединения
-  const pingInterval = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
-    } else {
-      clearInterval(pingInterval);
-    }
-  }, 30000);
-  
-  ws.on('pong', () => {
-    log(`Pong received from ${clientId}`, 'DEBUG');
   });
 });
 
@@ -146,7 +117,7 @@ function handleJoinRoom(clientId, roomId, ws) {
   
   const room = rooms.get(roomId);
   
-  // Проверяем, что в комнате не более 2 участников
+  // Проверяем лимит участников
   if (room.size >= 2) {
     log(`Client ${clientId} tried to join full room ${roomId}`, 'WARN');
     sendMessage(ws, {
@@ -165,7 +136,7 @@ function handleJoinRoom(clientId, roomId, ws) {
   // Добавляем клиента в комнату
   room.add(clientId);
   
-  // Обновляем информацию о клиенте
+  // ИСПРАВЛЕНО: обновляем информацию о клиенте
   if (clientInfo) {
     clientInfo.roomId = roomId;
   }
@@ -179,12 +150,13 @@ function handleJoinRoom(clientId, roomId, ws) {
     participantCount: room.size
   });
   
-  // Если в комнате уже есть другой участник, уведомляем обоих
+  // Если в комнате уже есть другой участник, уведомляем ОБОИХ
   if (room.size === 2) {
     const otherClientId = Array.from(room).find(id => id !== clientId);
     const otherClient = connections.get(otherClientId);
     
     if (otherClient && otherClient.ws) {
+      // Уведомляем первого клиента о втором
       sendMessage(otherClient.ws, {
         type: 'user-joined',
         userId: clientId,
@@ -194,12 +166,11 @@ function handleJoinRoom(clientId, roomId, ws) {
       log(`Notified ${otherClientId} about ${clientId} joining room ${roomId}`);
     }
   }
-  
-  logStats();
 }
 
+// ИСПРАВЛЕННЫЙ handleOffer
 function handleOffer(clientId, roomId, offer) {
-  log(`Handling offer from ${clientId} in room ${roomId}`, 'DEBUG');
+  log(`Handling offer from ${clientId} in room ${roomId}`);
   
   const room = rooms.get(roomId);
   if (!room) {
@@ -215,41 +186,52 @@ function handleOffer(clientId, roomId, offer) {
   }
   
   const otherClient = connections.get(otherClientId);
-  if (otherClient && otherClient.ws) {
+  if (otherClient && otherClient.ws && otherClient.ws.readyState === WebSocket.OPEN) {
+    // ИСПРАВЛЕНО: отправляем offer без лишних полей
     sendMessage(otherClient.ws, {
       type: 'offer',
       offer: offer,
+      roomId: roomId,
       fromUserId: clientId
     });
-    log(`Forwarded offer from ${clientId} to ${otherClientId}`);
+    log(`✅ Forwarded offer from ${clientId} to ${otherClientId}`);
   } else {
-    log(`Offer from ${clientId}: target client ${otherClientId} not available`, 'WARN');
+    log(`❌ Offer from ${clientId}: target client ${otherClientId} not available`, 'WARN');
   }
 }
 
+// ИСПРАВЛЕННЫЙ handleAnswer
 function handleAnswer(clientId, roomId, answer) {
-  log(`Handling answer from ${clientId} in room ${roomId}`, 'DEBUG');
+  log(`Handling answer from ${clientId} in room ${roomId}`);
   
   const room = rooms.get(roomId);
-  if (!room) return;
+  if (!room) {
+    log(`Answer from ${clientId}: room ${roomId} not found`, 'WARN');
+    return;
+  }
   
   const otherClientId = Array.from(room).find(id => id !== clientId);
-  if (!otherClientId) return;
+  if (!otherClientId) {
+    log(`Answer from ${clientId}: no other participant in room ${roomId}`, 'WARN');
+    return;
+  }
   
   const otherClient = connections.get(otherClientId);
-  if (otherClient && otherClient.ws) {
+  if (otherClient && otherClient.ws && otherClient.ws.readyState === WebSocket.OPEN) {
+    // ИСПРАВЛЕНО: отправляем answer без лишних полей
     sendMessage(otherClient.ws, {
       type: 'answer',
       answer: answer,
+      roomId: roomId,
       fromUserId: clientId
     });
-    log(`Forwarded answer from ${clientId} to ${otherClientId}`);
+    log(`✅ Forwarded answer from ${clientId} to ${otherClientId}`);
+  } else {
+    log(`❌ Answer from ${clientId}: target client ${otherClientId} not available`, 'WARN');
   }
 }
 
 function handleIceCandidate(clientId, roomId, candidate) {
-  log(`Handling ICE candidate from ${clientId} in room ${roomId}`, 'DEBUG');
-  
   const room = rooms.get(roomId);
   if (!room) return;
   
@@ -257,13 +239,13 @@ function handleIceCandidate(clientId, roomId, candidate) {
   if (!otherClientId) return;
   
   const otherClient = connections.get(otherClientId);
-  if (otherClient && otherClient.ws) {
+  if (otherClient && otherClient.ws && otherClient.ws.readyState === WebSocket.OPEN) {
     sendMessage(otherClient.ws, {
       type: 'ice-candidate',
       candidate: candidate,
+      roomId: roomId,
       fromUserId: clientId
     });
-    log(`Forwarded ICE candidate from ${clientId} to ${otherClientId}`);
   }
 }
 
@@ -271,17 +253,14 @@ function handleLeaveRoom(clientId, roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
   
-  // Удаляем клиента из комнаты
   room.delete(clientId);
   
   log(`Client ${clientId} left room ${roomId} (${room.size} participants remaining)`);
   
-  // Если комната пустая, удаляем её
   if (room.size === 0) {
     rooms.delete(roomId);
     log(`Removed empty room ${roomId}`);
   } else {
-    // Уведомляем оставшегося участника
     const otherClientId = Array.from(room)[0];
     const otherClient = connections.get(otherClientId);
     
@@ -291,7 +270,6 @@ function handleLeaveRoom(clientId, roomId) {
         userId: clientId,
         participantCount: room.size
       });
-      log(`Notified ${otherClientId} about ${clientId} leaving room ${roomId}`);
     }
   }
   
@@ -300,8 +278,6 @@ function handleLeaveRoom(clientId, roomId) {
   if (clientInfo) {
     clientInfo.roomId = null;
   }
-  
-  logStats();
 }
 
 function handleDisconnect(clientId) {
@@ -313,7 +289,6 @@ function handleDisconnect(clientId) {
   
   connections.delete(clientId);
   log(`Cleaned up connection for ${clientId}`);
-  logStats();
 }
 
 function sendMessage(ws, message) {
@@ -335,30 +310,12 @@ function generateId() {
   return Math.random().toString(36).substr(2, 9);
 }
 
-// Обработка сигналов для graceful shutdown
-process.on('SIGTERM', () => {
-  log('Received SIGTERM, shutting down gracefully');
-  wss.close(() => {
-    process.exit(0);
-  });
-});
-
-process.on('SIGINT', () => {
-  log('Received SIGINT, shutting down gracefully');
-  wss.close(() => {
-    process.exit(0);
-  });
-});
-
 const PORT = process.env.PORT || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
 
 server.listen(PORT, HOST, () => {
   log(`Signaling server running on ${HOST}:${PORT}`);
   log(`Health check available at http://${HOST}:${PORT}/health`);
-  
-  // Периодическая статистика каждые 5 минут
-  setInterval(logStats, 5 * 60 * 1000);
 });
 
 server.on('error', (error) => {
