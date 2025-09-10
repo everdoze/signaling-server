@@ -106,7 +106,15 @@ wss.on('connection', (ws, req) => {
 function handlePeerReady(clientId, ws) {
   const clientInfo = connections.get(clientId);
   if (clientInfo && clientInfo.roomId) {
-    sendMessage(ws, {
+    const room = rooms.get(clientInfo.roomId);
+    const otherClientId = Array.from(room).find(id => id !== clientId);
+    const otherClientInfo = connections.get(otherClientId);
+    
+    if (!otherClientInfo || !otherClientInfo.ws) {
+      return log(`Client ${otherClientId} is unknown in room ${clientInfo.roomId}.`, 'ERROR');
+    }
+    
+    return sendMessage(otherClientInfo.ws, {
       type: 'user-peer-ready',
       roomId: clientInfo.roomId
     });
